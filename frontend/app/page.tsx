@@ -1,40 +1,26 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from "react";
 
-function decimalToAmerican(decimal: number): string {
-  if (!decimal || decimal <= 1) return '+100';
-  if (decimal >= 2.0) {
-    const american = Math.round((decimal - 1) * 100);
-    return `+${american}`;
-  } else {
-    const american = Math.round(-100 / (decimal - 1));
-    return `${american}`;
-  }
-}
-
-function americanToDecimal(americanStr: string | number): number {
-  const cleanStr = String(americanStr).trim().replace('+', '');
-  const american = parseInt(cleanStr, 10);
-  if (isNaN(american) || american === 0) return 2.0;
-  if (american > 0) {
-    return parseFloat((american / 100 + 1).toFixed(3));
-  } else {
-    return parseFloat((100 / Math.abs(american) + 1).toFixed(3));
-  }
-}
+// ==========================================
+// TYPES & INTERFACES
+// ==========================================
 
 interface Fixture {
   id: number;
+  matchday: number;
   date: string;
   home: string;
   away: string;
-  odds_h: number;
-  odds_d: number;
-  odds_a: number;
+  odds_h_american?: string;
+  odds_d_american?: string;
+  odds_a_american?: string;
+  odds_h: number | null;
+  odds_d: number | null;
+  odds_a: number | null;
 }
 
-interface SimResult {
+interface SimulationResult {
   lambda_home: number;
   lambda_away: number;
   sims: {
@@ -43,317 +29,412 @@ interface SimResult {
     away_win_prob: number;
     over_2_5_prob: number;
     btts_prob: number;
-    avg_home_goals: number;
-    avg_away_goals: number;
-    top_scorelines: Record<string, number>;
+  };
+  fair_odds: {
+    odds_h_american: string;
+    odds_d_american: string;
+    odds_a_american: string;
+    odds_h: number;
+    odds_d: number;
+    odds_a: number;
   };
   suggestions: string[];
 }
 
+interface OddsState {
+  home: string;
+  draw: string;
+  away: string;
+}
+
+// ==========================================
+// HELPER UTILITIES
+// ==========================================
+
+/**
+ * Converts American Odds string (+110, -125) to Implied Probability Percentage (%)
+ */
+function parseAmericanToImplied(americanStr: string): number {
+  if (!americanStr) return 0;
+  const clean = americanStr.replace("+", "").trim();
+  const num = parseFloat(clean);
+  if (isNaN(num) || num === 0) return 0;
+
+  if (num > 0) {
+    return (100 / (num + 100)) * 100;
+  } else {
+    const pos = Math.abs(num);
+    return (pos / (pos + 100)) * 100;
+  }
+}
+
+// ==========================================
+// MAIN COMPONENT
+// ==========================================
+
 export default function Home() {
+  // Navigation & Data States
+  const [matchday, setMatchday] = useState<number>(1);
+  const [availableMatchdays, setAvailableMatchdays] = useState<number[]>([]);
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
-  const [teams, setTeams] = useState<string[]>([]);
-  
-  const [homeTeam, setHomeTeam] = useState('Real Madrid');
-  const [awayTeam, setAwayTeam] = useState('Real Sociedad');
-  
-  const [americanOddsH, setAmericanOddsH] = useState('-154');
-  const [americanOddsD, setAmericanOddsD] = useState('+290');
-  const [americanOddsA, setAmericanOddsA] = useState('+425');
+  const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
 
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<SimResult | null>(null);
+  // Editable Market Odds State (American Odds)
+  const [odds, setOdds] = useState<OddsState>({
+    home: "+110",
+    draw: "+240",
+    away: "+220",
+  });
 
+  // Simulation & Async Loading States
+  const [simulation, setSimulation] = useState<SimulationResult | null>(null);
+  const [loadingFixtures, setLoadingFixtures] = useState<boolean>(false);
+  const [isSimulating, setIsSimulating] = useState<boolean>(false);
+
+  // 1. Fetch available matchday dropdown list
   useEffect(() => {
-    fetch('http://localhost:8000/api/fixtures')
-      .then((res) => res.json())
-      .then((data) => setFixtures(data))
-      .catch((err) => console.error('Failed to load fixtures:', err));
-
-    fetch('http://localhost:8000/api/teams')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.teams && data.teams.length > 0) {
-          setTeams(data.teams);
-        } else {
-          setTeams(['FC Barcelona', 'Real Madrid', 'Real Sociedad', 'Athletic Club', 'Atletico Madrid', 'Sevilla FC']);
-        }
-      })
-      .catch(() => {
-        setTeams(['FC Barcelona', 'Real Madrid', 'Real Sociedad', 'Athletic Club', 'Atletico Madrid', 'Sevilla FC']);
-      });
+    async function fetchMatchdays() {
+      try {
+        const res = await fetch("http://127.0.0.1:8000/api/matchdays");
+        const data = await res.json();
+        setAvailableMatchdays(data.matchdays || Array.from({ length: 38 }, (_, i) => i + 1));
+      } catch (err) {
+        setAvailableMatchdays(Array.from({ length: 38 }, (_, i) => i + 1));
+      }
+    }
+    fetchMatchdays();
   }, []);
 
-const loadFixtureIntoSim = (f: Fixture) => {
-    // 1. Reset simulation results so old metrics disappear immediately
-    setResult(null);
+  // 2. Fetch fixtures whenever selected matchday changes
+  useEffect(() => {
+    async function fetchFixtures() {
+      setLoadingFixtures(true);
+      setSimulation(null);
+      try {
+        const res = await fetch(`http://127.0.0.1:8000/api/fixtures?matchday=${matchday}`);
+        const data = await res.json();
+        const list: Fixture[] = Array.isArray(data) ? data : data.fixtures || [];
+        setFixtures(list);
 
-    // 2. Ensure team options exist in state
-    setTeams((prev) => {
-      const updated = [...prev];
-      if (!updated.includes(f.home)) updated.push(f.home);
-      if (!updated.includes(f.away)) updated.push(f.away);
-      return updated;
+        if (list.length > 0) {
+          handleSelectFixture(list[0]);
+        }
+      } catch (err) {
+        console.error("Failed to load fixtures:", err);
+        setFixtures([]);
+      } finally {
+        setLoadingFixtures(false);
+      }
+    }
+    fetchFixtures();
+  }, [matchday]);
+
+  // Handle Match Selection & Sync Editable Inputs
+  const handleSelectFixture = (fixture: Fixture) => {
+    setSelectedFixture(fixture);
+    setOdds({
+      home: fixture.odds_h_american || "+110",
+      draw: fixture.odds_d_american || "+240",
+      away: fixture.odds_a_american || "+220",
     });
-
-    // 3. Set teams directly
-    setHomeTeam(f.home);
-    setAwayTeam(f.away);
-
-    // 4. Set American odds strings
-    setAmericanOddsH(decimalToAmerican(f.odds_h));
-    setAmericanOddsD(decimalToAmerican(f.odds_d));
-    setAmericanOddsA(decimalToAmerican(f.odds_a));
+    setSimulation(null);
   };
 
-  const handleSimulate = async () => {
-    setLoading(true);
-    const decH = americanToDecimal(americanOddsH);
-    const decD = americanToDecimal(americanOddsD);
-    const decA = americanToDecimal(americanOddsA);
+  // Run Monte Carlo Simulation
+  const handleRunSimulation = async () => {
+    if (!selectedFixture) return;
+    setIsSimulating(true);
 
     try {
-      const res = await fetch('http://localhost:8000/api/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("http://127.0.0.1:8000/api/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          home_team: homeTeam,
-          away_team: awayTeam,
-          odds_h: decH,
-          odds_d: decD,
-          odds_a: decA,
+          home_team: selectedFixture.home,
+          away_team: selectedFixture.away,
+          odds_h: odds.home,
+          odds_d: odds.draw,
+          odds_a: odds.away,
         }),
       });
       const data = await res.json();
-      setResult(data);
+      setSimulation(data);
     } catch (err) {
-      console.error('Simulation error:', err);
+      console.error("Simulation error:", err);
     } finally {
-      setLoading(false);
+      setIsSimulating(false);
     }
   };
 
+  // Compute Live Implied Probabilities and Margin
+  const impliedH = parseAmericanToImplied(odds.home);
+  const impliedD = parseAmericanToImplied(odds.draw);
+  const impliedA = parseAmericanToImplied(odds.away);
+  const marketMargin = impliedH + impliedD + impliedA;
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            <div className="h-8 w-1.5 bg-emerald-500 rounded-full"></div>
-            <div>
-              <h1 className="text-xl font-bold text-white flex items-center gap-2">
-                LA LIGA <span className="text-emerald-400 font-extrabold">SIMULATION ENGINE</span>
-              </h1>
-              <p className="text-xs text-slate-400">Monte Carlo 10k Poisson Model</p>
-            </div>
-          </div>
+    <main className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10 font-sans">
+      {/* Header Bar */}
+      <header className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 border-b border-slate-800 pb-6">
+        <div>
+          <h1 className="text-3xl font-extrabold tracking-tight text-white">
+            La Liga Intelligence Platform <span className="text-amber-400">2026/27</span>
+          </h1>
+          <p className="text-slate-400 text-sm mt-1">
+            Monte Carlo Simulations • Dixon-Coles Poisson • American Market Lines
+          </p>
+        </div>
+
+        {/* Matchday Selector */}
+        <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 p-2.5 rounded-xl shadow-md">
+          <label htmlFor="matchday-select" className="text-xs font-semibold uppercase text-slate-400">
+            Matchday:
+          </label>
+          <select
+            id="matchday-select"
+            value={matchday}
+            onChange={(e) => setMatchday(Number(e.target.value))}
+            className="bg-slate-800 text-amber-400 font-bold px-3 py-1.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 cursor-pointer"
+          >
+            {availableMatchdays.map((m) => (
+              <option key={m} value={m}>
+                Matchday {m}
+              </option>
+            ))}
+          </select>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* FIXTURE SIDEBAR */}
-        <section className="lg:col-span-4 space-y-3">
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Matchday Fixtures & Lines
-          </h2>
-          <div className="max-h-[640px] overflow-y-auto pr-2 space-y-2.5">
-            {fixtures.map((f) => (
-              <div
-                key={f.id}
-                className="p-3.5 bg-slate-900/60 border border-slate-800 rounded-xl flex flex-col gap-2.5 hover:border-slate-700 transition"
-              >
-                <div className="flex justify-between items-center text-xs text-slate-400">
-                  <span className="font-mono">{f.date}</span>
-                  <div className="flex gap-1.5 font-mono text-[11px]">
-                    <span className="bg-slate-950 px-1.5 py-0.5 rounded text-emerald-400">
-                      {decimalToAmerican(f.odds_h)}
-                    </span>
-                    <span className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-400">
-                      {decimalToAmerican(f.odds_d)}
-                    </span>
-                    <span className="bg-slate-950 px-1.5 py-0.5 rounded text-sky-400">
-                      {decimalToAmerican(f.odds_a)}
-                    </span>
+      {/* Main Grid Layout */}
+      <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-12 gap-8">
+        
+        {/* Left Panel: Fixtures List */}
+        <section className="md:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-lg font-bold text-white">Matchday {matchday} Schedule</h2>
+            <span className="text-xs font-mono bg-slate-800 text-slate-400 px-2.5 py-1 rounded-md border border-slate-700">
+              {fixtures.length} Fixtures
+            </span>
+          </div>
+
+          <div className="space-y-3 max-h-[660px] overflow-y-auto pr-1 custom-scrollbar">
+            {loadingFixtures ? (
+              <div className="text-center py-12 text-slate-500 font-mono text-sm">
+                Fetching fixtures from pipeline...
+              </div>
+            ) : fixtures.length === 0 ? (
+              <div className="text-center py-12 text-slate-500 text-sm">
+                No fixtures found for this matchday.
+              </div>
+            ) : (
+              fixtures.map((f) => {
+                const isSelected = selectedFixture?.id === f.id;
+                return (
+                  <div
+                    key={f.id}
+                    onClick={() => handleSelectFixture(f)}
+                    className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                      isSelected
+                        ? "bg-slate-800 border-amber-400 shadow-lg shadow-amber-500/10"
+                        : "bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-850"
+                    }`}
+                  >
+                    <div className="flex justify-between items-center text-xs text-slate-400 font-medium mb-2">
+                      <span className="text-amber-400 font-semibold">{f.date}</span>
+                      <span className="bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-[10px] font-mono">
+                        EST
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between items-center text-sm font-semibold text-slate-200">
+                      <span className="truncate pr-1">{f.home}</span>
+                      <span className="text-xs text-slate-500 font-normal px-2">vs</span>
+                      <span className="truncate pl-1 text-right">{f.away}</span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 mt-3 text-center text-xs font-mono">
+                      <div className="bg-slate-900/80 p-1.5 rounded border border-slate-800">
+                        <span className="text-slate-500 text-[10px] block">1</span>
+                        <span className="text-slate-300 font-bold">{f.odds_h_american || "-"}</span>
+                      </div>
+                      <div className="bg-slate-900/80 p-1.5 rounded border border-slate-800">
+                        <span className="text-slate-500 text-[10px] block">X</span>
+                        <span className="text-slate-300 font-bold">{f.odds_d_american || "-"}</span>
+                      </div>
+                      <div className="bg-slate-900/80 p-1.5 rounded border border-slate-800">
+                        <span className="text-slate-500 text-[10px] block">2</span>
+                        <span className="text-slate-300 font-bold">{f.odds_a_american || "-"}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </section>
+
+        {/* Right Panel: Odds Controls & Simulation Engine */}
+        <section className="md:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white mb-4">
+              Match Intelligence & Predictive Engine
+            </h2>
+
+            {selectedFixture ? (
+              <>
+                {/* Active Fixture Header */}
+                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 mb-6 flex justify-between items-center">
+                  <div>
+                    <p className="text-xs text-slate-400">Selected Match</p>
+                    <p className="text-base font-bold text-amber-400">
+                      {selectedFixture.home} vs {selectedFixture.away}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-slate-400">Kickoff</p>
+                    <p className="text-sm font-mono text-slate-200">{selectedFixture.date}</p>
                   </div>
                 </div>
 
-                <div className="flex justify-between items-center">
-                  <p className="text-sm font-semibold text-slate-200">
-                    {f.home} <span className="text-slate-500 font-normal">vs</span> {f.away}
-                  </p>
+                {/* Editable Odds Controls */}
+                <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-xl mb-6">
+                  <div className="flex justify-between items-center mb-3">
+                    <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                      Market Lines (American Odds) & Overround
+                    </h3>
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Vig / Margin: <strong className="text-amber-400">{marketMargin.toFixed(1)}%</strong>
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 mb-4">
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Home (1)</label>
+                      <input
+                        type="text"
+                        value={odds.home}
+                        onChange={(e) => setOdds({ ...odds, home: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 text-white font-mono font-bold px-3 py-1.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        placeholder="+110"
+                      />
+                      <p className="text-[11px] text-slate-400 mt-1 font-mono">
+                        Implied: <strong className="text-slate-200">{impliedH.toFixed(1)}%</strong>
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Draw (X)</label>
+                      <input
+                        type="text"
+                        value={odds.draw}
+                        onChange={(e) => setOdds({ ...odds, draw: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 text-white font-mono font-bold px-3 py-1.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        placeholder="+240"
+                      />
+                      <p className="text-[11px] text-slate-400 mt-1 font-mono">
+                        Implied: <strong className="text-slate-200">{impliedD.toFixed(1)}%</strong>
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Away (2)</label>
+                      <input
+                        type="text"
+                        value={odds.away}
+                        onChange={(e) => setOdds({ ...odds, away: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 text-white font-mono font-bold px-3 py-1.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        placeholder="+220"
+                      />
+                      <p className="text-[11px] text-slate-400 mt-1 font-mono">
+                        Implied: <strong className="text-slate-200">{impliedA.toFixed(1)}%</strong>
+                      </p>
+                    </div>
+                  </div>
+
                   <button
-                    onClick={() => loadFixtureIntoSim(f)}
-                    className="text-xs bg-slate-800 hover:bg-emerald-600 hover:text-slate-950 text-slate-300 font-medium px-2.5 py-1 rounded-md border border-slate-700 transition cursor-pointer"
+                    onClick={handleRunSimulation}
+                    disabled={isSimulating}
+                    className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 px-4 rounded-lg transition-colors shadow-lg shadow-amber-500/10 cursor-pointer disabled:opacity-50"
                   >
-                    Load Match
+                    {isSimulating ? "Executing Monte Carlo (10,000 Sims)..." : "Run Match Simulation"}
                   </button>
                 </div>
-              </div>
-            ))}
-          </div>
-        </section>
 
-        {/* MAIN WORKSPACE */}
-        <section className="lg:col-span-8 space-y-6">
-          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-white mb-6">Match Configuration</h2>
-
-            {/* TEAM DROPDOWNS */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase">
-                  Home Team
-                </label>
-                <select
-                  value={homeTeam}
-                  onChange={(e) => setHomeTeam(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-white focus:ring-2 focus:ring-emerald-500"
-                >
-                  {teams.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase">
-                  Away Team
-                </label>
-                <select
-                  value={awayTeam}
-                  onChange={(e) => setAwayTeam(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-white focus:ring-2 focus:ring-emerald-500"
-                >
-                  {teams.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* AMERICAN ODDS INPUTS */}
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Home Win (American)
-                </label>
-                <input
-                  type="text"
-                  value={americanOddsH}
-                  onChange={(e) => setAmericanOddsH(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm font-mono text-emerald-400 focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Draw (American)
-                </label>
-                <input
-                  type="text"
-                  value={americanOddsD}
-                  onChange={(e) => setAmericanOddsD(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm font-mono text-amber-400 focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Away Win (American)
-                </label>
-                <input
-                  type="text"
-                  value={americanOddsA}
-                  onChange={(e) => setAmericanOddsA(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm font-mono text-sky-400 focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-            </div>
-
-            <button
-              onClick={handleSimulate}
-              disabled={loading}
-              className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition cursor-pointer"
-            >
-              {loading ? 'Running 10,000 Monte Carlo Iterations...' : 'Run Simulation Engine'}
-            </button>
-          </div>
-
-          {/* RESULTS DISPLAY */}
-          {result && (
-            <div className="space-y-6">
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex justify-between items-center">
-                <div>
-                  <h3 className="text-2xl font-black text-white">
-                    {homeTeam} <span className="text-slate-500 font-normal">vs</span> {awayTeam}
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    LightGBM Projected xG: <span className="text-emerald-400 font-mono">{result.lambda_home.toFixed(2)}</span> – <span className="text-emerald-400 font-mono">{result.lambda_away.toFixed(2)}</span>
-                  </p>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs text-slate-400 block">Avg Simulated Goals</span>
-                  <span className="text-xl font-mono font-bold text-slate-100">
-                    {result.sims.avg_home_goals.toFixed(2)} - {result.sims.avg_away_goals.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-                <h4 className="text-xs font-semibold text-slate-400 uppercase mb-4">
-                  Model Win Probabilities vs Sportsbook Implied
-                </h4>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center">
-                    <p className="text-xs text-slate-400 mb-1">{homeTeam}</p>
-                    <p className="text-2xl font-black text-emerald-400">
-                      {(result.sims.home_win_prob * 100).toFixed(1)}%
-                    </p>
-                    <p className="text-xs font-mono text-slate-500 mt-1">
-                      Implied: {((1 / americanToDecimal(americanOddsH)) * 100).toFixed(1)}%
-                    </p>
-                  </div>
-
-                  <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center">
-                    <p className="text-xs text-slate-400 mb-1">Draw</p>
-                    <p className="text-2xl font-black text-amber-400">
-                      {(result.sims.draw_prob * 100).toFixed(1)}%
-                    </p>
-                    <p className="text-xs font-mono text-slate-500 mt-1">
-                      Implied: {((1 / americanToDecimal(americanOddsD)) * 100).toFixed(1)}%
-                    </p>
-                  </div>
-
-                  <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-center">
-                    <p className="text-xs text-slate-400 mb-1">{awayTeam}</p>
-                    <p className="text-2xl font-black text-sky-400">
-                      {(result.sims.away_win_prob * 100).toFixed(1)}%
-                    </p>
-                    <p className="text-xs font-mono text-slate-500 mt-1">
-                      Implied: {((1 / americanToDecimal(americanOddsA)) * 100).toFixed(1)}%
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-                <h4 className="text-xs font-bold uppercase text-emerald-400 mb-3">Model Insights</h4>
-                <div className="space-y-2 text-sm text-slate-200">
-                  {result.suggestions.map((sug, i) => (
-                    <div key={i} className="flex items-start gap-2 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
-                      <span className="text-emerald-400 font-bold">›</span>
-                      <p>{sug}</p>
+                {/* Simulation Output Card */}
+                {simulation && (
+                  <div className="space-y-6">
+                    {/* Expected Goal Expectations (Clean λ rendering) */}
+                    <div className="grid grid-cols-2 gap-4 text-center">
+                      <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <p className="text-xs text-slate-400">Home xG (λh)</p>
+                        <p className="text-2xl font-black text-emerald-400">{simulation.lambda_home}</p>
+                      </div>
+                      <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <p className="text-xs text-slate-400">Away xG (λa)</p>
+                        <p className="text-2xl font-black text-emerald-400">{simulation.lambda_away}</p>
+                      </div>
                     </div>
-                  ))}
-                </div>
+
+                    {/* Model Probability vs Market Implied Comparison */}
+                    <div>
+                      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                        Model Probability vs Market Implied
+                      </h3>
+                      <div className="grid grid-cols-3 gap-3 text-center">
+                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
+                          <p className="text-xs text-slate-400">Home Win</p>
+                          <p className="text-lg font-bold text-white">
+                            {(simulation.sims.home_win_prob * 100).toFixed(1)}%
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-mono mt-0.5">
+                            Mkt: {impliedH.toFixed(1)}%
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
+                          <p className="text-xs text-slate-400">Draw</p>
+                          <p className="text-lg font-bold text-white">
+                            {(simulation.sims.draw_prob * 100).toFixed(1)}%
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-mono mt-0.5">
+                            Mkt: {impliedD.toFixed(1)}%
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
+                          <p className="text-xs text-slate-400">Away Win</p>
+                          <p className="text-lg font-bold text-white">
+                            {(simulation.sims.away_win_prob * 100).toFixed(1)}%
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-mono mt-0.5">
+                            Mkt: {impliedA.toFixed(1)}%
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Value Insights & Suggestions */}
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                        Value Edge & Insights
+                      </h3>
+                      {simulation.suggestions.map((insight, idx) => (
+                        <div key={idx} className="p-3 bg-slate-950/80 border border-slate-800 rounded-lg text-xs text-amber-300 font-medium">
+                          {insight}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-center py-20 text-slate-500">
+                Select a match from the schedule panel to enter custom lines and simulate.
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </section>
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }
