@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+html,
+body {
+  background-color: #020617; /* Slate 950 */
+  color: #f8fafc; /* Slate 50 */
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #020617;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
