@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 # Internal Module Imports
 from features import prepare_dataset
 from train import fine_tune_and_train
-from odds import fetch_draftkings_odds_dict
+
 
 # Load environment configuration
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -30,38 +30,6 @@ load_dotenv(dotenv_path=env_path)
 
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
 EST_TZ = ZoneInfo("America/New_York")
-
-# ==========================================
-# 1. AMERICAN ODDS CONVERSION UTILITIES
-# ==========================================
-
-def decimal_to_american(decimal_odds: float) -> str:
-    """Converts decimal odds (e.g. 2.10, 1.80) to American odds format (+110, -125)."""
-    if not decimal_odds or decimal_odds <= 1.0:
-        return "+100"
-    if decimal_odds >= 2.0:
-        val = int(round((decimal_odds - 1.0) * 100))
-        return f"+{val}"
-    else:
-        val = int(round(-100.0 / (decimal_odds - 1.0)))
-        return f"{val}"
-
-
-def american_to_decimal(american_input: Union[str, float, int]) -> float:
-    """Converts American odds (+150, -110) or raw decimal numeric inputs to decimal odds."""
-    if isinstance(american_input, (float, int)) and 1.0 < american_input < 50.0:
-        return float(american_input)
-
-    clean_str = str(american_input).replace("+", "").strip()
-    try:
-        val = float(clean_str)
-        if val > 0:
-            return (val / 100.0) + 1.0
-        elif val < 0:
-            return (100.0 / abs(val)) + 1.0
-        return 2.0
-    except ValueError:
-        return 2.0
 
 # ==========================================
 # 2. TEAM MAPS & NORMALIZATION LOGIC
@@ -171,9 +139,7 @@ def fetch_fixtures_football_data_api(matchday: int) -> List[Dict[str, Any]]:
                 "date": date_str,
                 "home": normalize_team_name(m.get("homeTeam", {}).get("name", "")),
                 "away": normalize_team_name(m.get("awayTeam", {}).get("name", "")),
-                "odds_h": None,
-                "odds_d": None,
-                "odds_a": None,
+                
             })
         return results
     except Exception as e:
@@ -222,9 +188,6 @@ def scrape_laliga_matchday_web(matchday: int) -> List[Dict[str, Any]]:
                     "date": f"{current_date_str}, {time_col}",
                     "home": normalize_team_name(home_raw),
                     "away": normalize_team_name(away_raw),
-                    "odds_h": None,
-                    "odds_d": None,
-                    "odds_a": None,
                 })
                 match_id += 1
 
@@ -248,26 +211,13 @@ def get_dynamic_matchday_fixtures(matchday: int) -> List[Dict[str, Any]]:
 class MatchRequest(BaseModel):
     home_team: str
     away_team: str
-    odds_h: Union[str, float, int] = Field(..., description="American odds string or numeric decimal odds")
-    odds_d: Union[str, float, int] = Field(..., description="American odds string or numeric decimal odds")
-    odds_a: Union[str, float, int] = Field(..., description="American odds string or numeric decimal odds")
-
-
-class FairOdds(BaseModel):
-    odds_h_american: str
-    odds_d_american: str
-    odds_a_american: str
-    odds_h: float
-    odds_d: float
-    odds_a: float
 
 
 class SimulationResponse(BaseModel):
     lambda_home: float
     lambda_away: float
     sims: Dict[str, Any]
-    fair_odds: FairOdds
-    suggestions: List[str]
+    
 
 # ==========================================
 # 5. PREDICTIVE EXPECTED GOALS (xG) ENGINE
@@ -427,30 +377,6 @@ def simulate_match_poisson(lambda_home: float, lambda_away: float, num_sims: int
     }
 
 
-def generate_betting_insights(sims: Dict[str, Any], market_h_dec: float, market_d_dec: float, market_a_dec: float) -> List[str]:
-    """Detects positive EV betting edges against market prices."""
-    insights = []
-    implied_h = 1.0 / market_h_dec if market_h_dec > 0 else 0
-    implied_d = 1.0 / market_d_dec if market_d_dec > 0 else 0
-    implied_a = 1.0 / market_a_dec if market_a_dec > 0 else 0
-
-    edge_h = sims["home_win_prob"] - implied_h
-    edge_d = sims["draw_prob"] - implied_d
-    edge_a = sims["away_win_prob"] - implied_a
-
-    if edge_h > 0.035:
-        insights.append(f"🔥 Positive EV on Home Win: Model gives {(sims['home_win_prob']*100):.1f}% vs Market Implied {(implied_h*100):.1f}% (+{(edge_h*100):.1f}% edge).")
-    elif edge_a > 0.035:
-        insights.append(f"🔥 Positive EV on Away Win: Model gives {(sims['away_win_prob']*100):.1f}% vs Market Implied {(implied_a*100):.1f}% (+{(edge_a*100):.1f}% edge).")
-    elif edge_d > 0.040:
-        insights.append(f"⚖️ Value on Draw Market: Model probability {(sims['draw_prob']*100):.1f}% exceeds market pricing.")
-    else:
-        insights.append("🎯 Market lines are well-calibrated against model predictions.")
-
-    if sims["over_2_5_prob"] > 0.58:
-        insights.append(f"⚽ Over 2.5 Goals Lean: High expected goal volume ({(sims['over_2_5_prob']*100):.1f}% probability).")
-
-    return insights
 
 # ==========================================
 # 7. FASTAPI APPLICATION & ENDPOINTS
@@ -465,6 +391,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+def root():
+    return {"status": "ok", "docs": "/docs"}
 
 DATA_PATH = Path(__file__).parent.parent / "data" / "laliga_merged_2018_2025.csv"
 GLOBAL_DF: pd.DataFrame = None
@@ -499,71 +429,21 @@ def get_matchdays():
 
 @app.get("/api/fixtures")
 def get_fixtures_by_matchday(matchday: int = Query(1, ge=1, le=38)):
-    """Fetches matchday fixtures and formats market lines in both American & Decimal formats."""
+    """Fetches matchday fixtures """
     fixtures = get_dynamic_matchday_fixtures(matchday)
-
-    try:
-        live_odds_map = fetch_draftkings_odds_dict()
-    except Exception:
-        live_odds_map = {}
-
-    for f in fixtures:
-        pair_key = (f["home"], f["away"])
-        market_lines = live_odds_map.get(pair_key)
-
-        dec_h, dec_d, dec_a = None, None, None
-        if market_lines:
-            dec_h = market_lines.get("odds_h")
-            dec_d = market_lines.get("odds_d")
-            dec_a = market_lines.get("odds_a")
-
-        if not dec_h or dec_h <= 1.0:
-            l_h, l_a = predict_lambdas(f["home"], f["away"], GLOBAL_DF, HOME_MODEL, AWAY_MODEL)
-            sims = simulate_match_poisson(l_h, l_a)
-            dec_h = round(1.0 / sims["home_win_prob"], 2) if sims["home_win_prob"] > 0 else 2.10
-            dec_d = round(1.0 / sims["draw_prob"], 2) if sims["draw_prob"] > 0 else 3.40
-            dec_a = round(1.0 / sims["away_win_prob"], 2) if sims["away_win_prob"] > 0 else 3.20
-
-        f["odds_h"] = dec_h
-        f["odds_d"] = dec_d
-        f["odds_a"] = dec_a
-        f["odds_h_american"] = decimal_to_american(dec_h)
-        f["odds_d_american"] = decimal_to_american(dec_d)
-        f["odds_a_american"] = decimal_to_american(dec_a)
 
     return fixtures
 
 
 @app.post("/api/simulate", response_model=SimulationResponse)
 def run_simulation(req: MatchRequest):
-    """Executes Monte Carlo simulation accepting American odds inputs."""
-    dec_h = american_to_decimal(req.odds_h)
-    dec_d = american_to_decimal(req.odds_d)
-    dec_a = american_to_decimal(req.odds_a)
+    """Executes Monte Carlo simulation."""
 
     lambda_home, lambda_away = predict_lambdas(req.home_team, req.away_team, GLOBAL_DF, HOME_MODEL, AWAY_MODEL)
     sims = simulate_match_poisson(lambda_home, lambda_away)
 
-    fair_dec_h = 1.0 / sims["home_win_prob"] if sims["home_win_prob"] > 0 else 999.0
-    fair_dec_d = 1.0 / sims["draw_prob"] if sims["draw_prob"] > 0 else 999.0
-    fair_dec_a = 1.0 / sims["away_win_prob"] if sims["away_win_prob"] > 0 else 999.0
+    return {"lambda_home": lambda_home, "lambda_away": lambda_away, "sims": sims}
 
-    suggestions = generate_betting_insights(sims, dec_h, dec_d, dec_a)
-
-    return {
-        "lambda_home": lambda_home,
-        "lambda_away": lambda_away,
-        "sims": sims,
-        "fair_odds": {
-            "odds_h_american": decimal_to_american(fair_dec_h),
-            "odds_d_american": decimal_to_american(fair_dec_d),
-            "odds_a_american": decimal_to_american(fair_dec_a),
-            "odds_h": round(fair_dec_h, 2),
-            "odds_d": round(fair_dec_d, 2),
-            "odds_a": round(fair_dec_a, 2),
-        },
-        "suggestions": suggestions
-    }
 
 if __name__ == "__main__":
     import uvicorn

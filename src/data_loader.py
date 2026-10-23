@@ -158,6 +158,6 @@ if __name__ == "__main__":
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     # Test execution: Load 2022/23 to 2024/25 seasons
-    df = get_laliga_dataset(start_year=2018, end_year=2026, force_refresh=True)
+    df = get_laliga_dataset(start_year=2018, end_year=2025, force_refresh=True)
     print("\n--- DATASET PREVIEW ---")
     print(df[["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "home_xg", "away_xg", "PSH", "PSA"]].head())
